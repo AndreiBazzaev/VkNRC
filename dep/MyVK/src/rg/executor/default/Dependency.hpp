@@ -34,6 +34,10 @@ private:
 	std::vector<const ResourceBase *> m_resources, m_root_resources;
 
 	Relation m_pass_relation, m_resource_relation;
+	// Private implementation
+	struct PassVisitor;
+	struct InputVisitor;
+	struct ResourceVisitor;
 
 	void traverse_pass(const Args &args, const PassBase *p_pass);
 	const InputBase *traverse_output_alias(const Dependency::Args &args, const OutputAlias auto &output_alias);

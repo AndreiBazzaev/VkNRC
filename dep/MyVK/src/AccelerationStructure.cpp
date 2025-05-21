@@ -35,7 +35,7 @@ Ptr<AccelerationStructure> AccelerationStructure::Create(const Ptr<BufferBase> &
 Ptr<AccelerationStructure> AccelerationStructure::Create(const Ptr<Device> &device, VkDeviceSize size,
                                                          VkAccelerationStructureTypeKHR type,
                                                          const std::vector<Ptr<Queue>> &access_queues) {
-	return Create(myvk::Buffer::Create(device, size, 0, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+	return Create(myvk::Buffer::Create(device, size, 0, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 	                                   VMA_MEMORY_USAGE_AUTO, access_queues),
 	              {.size = size, .type = type});
 }

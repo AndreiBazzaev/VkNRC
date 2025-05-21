@@ -10,14 +10,16 @@ constexpr uint32_t kFrameCount = 3, kWidth = 1280, kHeight = 720;
 
 int main(int argc, char **argv) {
 	--argc, ++argv;
-	if (argc == 0) {
-		spdlog::error("No OBJ file");
-		return EXIT_FAILURE;
-	}
-	GLFWwindow *window = myvk::GLFWCreateWindow("VkNRC", kWidth, kHeight, true);
-
 	// Scene scene = Scene::LoadOBJShapeInstanceSAH(argv[0], 7); // at most 128 instances
-	Scene scene = Scene::LoadOBJSingleInstance(argv[0]);
+	Scene scene;
+	if (argc == 0) {
+		spdlog::error("No OBJ file, loading default");
+		// Put your scene name here for faster testing
+		scene = Scene::LoadOBJSingleInstance("living_room/living_room.obj");
+	}
+	else
+		scene = Scene::LoadOBJSingleInstance(argv[0]);
+	GLFWwindow *window = myvk::GLFWCreateWindow("VkNRC", kWidth, kHeight, true);
 	if (scene.Empty())
 		return EXIT_FAILURE;
 	spdlog::info("Loaded {} Vertices, {} Texcoords, {} Materials, {} Instances", scene.GetVertices().size(),

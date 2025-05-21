@@ -1,94 +1,166 @@
 #include "Dependency.hpp"
-
 #include <algorithm>
+#include <unordered_set>
+#include <iostream> // For debug output
+#include <cassert>  // For debug assertions
 
 namespace myvk_rg_executor {
 
-Dependency Dependency::Create(const Args &args) {
-	args.collection.ClearInfo(&PassInfo::dependency, &InputInfo::dependency, &ResourceInfo::dependency);
+	struct Dependency::PassVisitor {
+		const Args& args;
+		Dependency& self;
 
-	Dependency g = {};
+		void operator()(const GraphicsPassBase* p_pass) const { handle_pass(p_pass); }
+		void operator()(const ComputePassBase* p_pass) const { handle_pass(p_pass); }
+		void operator()(const TransferPassBase* p_pass) const { handle_pass(p_pass); } // example
 
-	for (const auto &it : args.render_graph.GetResultPoolData())
-		it.second.Visit([&](const auto *p_alias) { g.traverse_output_alias(args, *p_alias); });
-	g.tag_resources(args);
+		// Catch-all for unhandled types
+		void operator()(const auto* unused) const {
+			assert(false && "Unhandled pass type in PassVisitor");
+		}
 
-	g.add_war_edges();
-	g.sort_passes();
+	private:
+		template <typename PassType>
+		void handle_pass(const PassType* p_pass) const {
+			//std::cout << "[PassVisitor] Visiting pass: " << p_pass->GetName() << '\n';
 
-	// Less Relation: pass or resource is used totally prior than another pass or resource
-	g.get_pass_relation();
-	g.get_resource_relation();
+			for (const auto& it : p_pass->GetInputPoolData()) {
+				const InputBase* p_input = it.second.template Get<InputBase>();
+				self.get_dep_info(p_input).p_pass = p_pass;
+				self.get_dep_info(p_pass).inputs.push_back(p_input);
 
-	// For scheduler
-	g.add_image_read_edges();
-
-	return g;
-}
-
-const InputBase *Dependency::traverse_output_alias(const Dependency::Args &args, const OutputAlias auto &output_alias) {
-	const PassBase *p_src_pass = args.collection.FindPass(output_alias.GetSourcePassKey());
-	const InputBase *p_src_input = args.collection.FindInput(output_alias.GetSourceKey());
-	traverse_pass(args, p_src_pass);
-	return p_src_input;
-}
-
-void Dependency::traverse_pass(const Args &args, const PassBase *p_pass) {
-	if (m_pass_graph.HasVertex(p_pass))
-		return;
-	m_pass_graph.AddVertex(p_pass);
-
-	const auto pass_visitor = [&](const PassWithInput auto *p_pass) {
-		for (const auto &it : p_pass->GetInputPoolData()) {
-			const InputBase *p_input = it.second.template Get<InputBase>();
-			get_dep_info(p_input).p_pass = p_pass;
-			get_dep_info(p_pass).inputs.push_back(p_input);
-
-			p_input->GetInputAlias().Visit(overloaded(
-			    [&](const OutputAlias auto *p_output_alias) {
-				    const InputBase *p_src_input = traverse_output_alias(args, *p_output_alias);
-				    const PassBase *p_src_pass = get_dep_info(p_src_input).p_pass;
-				    const ResourceBase *p_resource = get_dep_info(p_src_input).p_resource;
-
-				    // This means p_src_pass is present in the stack, so a cycle exists
-				    if (!p_resource)
-					    Throw(error::PassNotDAG{});
-
-				    get_dep_info(p_input).p_resource = p_resource;
-
-				    m_pass_graph.AddEdge(p_src_pass, p_pass, PassEdge{p_src_input, p_input, p_resource});
-			    },
-			    [&](const RawAlias auto *p_raw_alias) {
-				    const ResourceBase *p_resource = args.collection.FindResource(p_raw_alias->GetSourceKey());
-				    m_resource_graph.AddVertex(p_resource);
-				    get_dep_info(p_input).p_resource = p_resource;
-
-				    p_resource->Visit(overloaded(
-				        [&](const CombinedResource auto *p_combined_resource) {
-					        for (const OutputAlias auto &src_alias : p_combined_resource->GetSubAliases()) {
-						        const InputBase *p_src_input = traverse_output_alias(args, src_alias);
-						        const PassBase *p_src_pass = get_dep_info(p_src_input).p_pass;
-						        const ResourceBase *p_sub_resource = get_dep_info(p_src_input).p_resource;
-
-						        // This means p_src_pass is present in the stack, so a cycle exists
-						        if (!p_sub_resource)
-							        Throw(error::PassNotDAG{});
-
-						        m_pass_graph.AddEdge(p_src_pass, p_pass,
-						                             PassEdge{p_src_input, p_input, p_sub_resource});
-						        m_resource_graph.AddEdge(p_resource, p_sub_resource, {});
-					        }
-				        },
-				        [&](auto &&) {
-					        m_pass_graph.AddEdge(nullptr, p_pass, PassEdge{nullptr, p_input, p_resource});
-				        }));
-			    }));
+				InputVisitor visitor{ args, self, p_pass, p_input };
+				p_input->GetInputAlias().Visit(visitor);
+			}
 		}
 	};
 
-	p_pass->Visit(overloaded(pass_visitor, [](auto &&) {}));
-}
+	struct Dependency::InputVisitor {
+		const Args& args;
+		Dependency& self;
+		const PassBase* p_pass;
+		const InputBase* p_input;
 
+		void operator()(const OutputAlias auto* p_output_alias) const {
+			std::cout << "[InputVisitor] Traversing OutputAlias\n";
+
+			const InputBase* p_src_input = self.traverse_output_alias(args, *p_output_alias);
+			if (!p_src_input) Throw(error::PassNotDAG{});
+
+			const PassBase* p_src_pass = self.get_dep_info(p_src_input).p_pass;
+			const ResourceBase* p_resource = self.get_dep_info(p_src_input).p_resource;
+
+			if (!p_resource || p_src_pass == p_pass) {
+				Throw(error::PassNotDAG{});
+			}
+
+			self.get_dep_info(p_input).p_resource = p_resource;
+			self.m_pass_graph.AddEdge(p_src_pass, p_pass, PassEdge{ p_src_input, p_input, p_resource });
+		}
+
+		void operator()(const RawAlias auto* p_raw_alias) const {
+			std::cout << "[InputVisitor] Handling RawAlias\n";
+
+			const ResourceBase* p_resource = args.collection.FindResource(p_raw_alias->GetSourceKey());
+			if (!p_resource) Throw(error::PassNotDAG{});
+
+			self.m_resource_graph.AddVertex(p_resource);
+			self.get_dep_info(p_input).p_resource = p_resource;
+
+			ResourceVisitor visitor{ args, self, p_pass, p_input, p_resource };
+			p_resource->Visit(visitor);
+		}
+
+		void operator()(const auto* unused) const {
+			assert(false && "Unhandled input alias type in InputVisitor");
+		}
+	};
+
+	struct Dependency::ResourceVisitor {
+		const Args& args;
+		Dependency& self;
+		const PassBase* p_pass;
+		const InputBase* p_input;
+		const ResourceBase* p_resource;
+
+		void operator()(const CombinedResource auto* p_combined_resource) const {
+			std::cout << "[ResourceVisitor] Handling CombinedResource\n";
+
+			for (const auto& src_alias : p_combined_resource->GetSubAliases()) {
+				const InputBase* p_src_input = self.traverse_output_alias(args, src_alias);
+				const PassBase* p_src_pass = self.get_dep_info(p_src_input).p_pass;
+				const ResourceBase* p_sub_resource = self.get_dep_info(p_src_input).p_resource;
+
+				if (!p_sub_resource || p_src_pass == p_pass) {
+					Throw(error::PassNotDAG{});
+				}
+
+				self.m_pass_graph.AddEdge(p_src_pass, p_pass, PassEdge{ p_src_input, p_input, p_sub_resource });
+				self.m_resource_graph.AddEdge(p_resource, p_sub_resource, {});
+			}
+		}
+
+		void operator()(const auto*) const {
+			std::cout << "[ResourceVisitor] Handling default resource\n";
+
+			self.m_pass_graph.AddEdge(nullptr, p_pass, PassEdge{ nullptr, p_input, p_resource });
+		}
+	};
+
+	Dependency Dependency::Create(const Args& args) {
+		args.collection.ClearInfo(&PassInfo::dependency, &InputInfo::dependency, &ResourceInfo::dependency);
+
+		Dependency g = {};
+		for (const auto& it : args.render_graph.GetResultPoolData()) {
+			it.second.Visit([&](const auto* p_alias) {
+				g.traverse_output_alias(args, *p_alias);
+				});
+		}
+		g.tag_resources(args);
+		g.add_war_edges();
+		g.sort_passes();
+		g.get_pass_relation();
+		g.get_resource_relation();
+		g.add_image_read_edges();
+		return g;
+	}
+
+	const InputBase* Dependency::traverse_output_alias(const Args& args, const OutputAlias auto& output_alias) {
+		const PassBase* p_src_pass = args.collection.FindPass(output_alias.GetSourcePassKey());
+		const InputBase* p_src_input = args.collection.FindInput(output_alias.GetSourceKey());
+
+		if (!p_src_pass || !p_src_input) {
+			std::cerr << "[Error] Invalid output alias: missing pass or input\n";
+			return nullptr;
+		}
+
+		//std::cout << "[traverse_output_alias] From pass: " << p_src_pass->GetName() << '\n';
+		traverse_pass(args, p_src_pass);
+		return p_src_input;
+	}
+
+	void Dependency::traverse_pass(const Args& args, const PassBase* p_pass) {
+		if (m_pass_graph.HasVertex(p_pass)) return;
+
+		static thread_local std::unordered_set<const PassBase*> pass_stack;
+		if (pass_stack.contains(p_pass)) {
+			Throw(error::PassNotDAG{});
+		}
+
+		//std::cout << "[traverse_pass] Visiting pass: " << p_pass->GetName() << '\n';
+
+		m_pass_graph.AddVertex(p_pass);
+		pass_stack.insert(p_pass);
+
+		try {
+			p_pass->Visit(PassVisitor{ args, *this });
+			pass_stack.erase(p_pass);
+		}
+		catch (...) {
+			pass_stack.erase(p_pass);
+			throw;
+		}
+	}
 struct AccessEdgeInfo {
 	std::vector<std::size_t> reads;
 	std::optional<std::size_t> opt_write;
